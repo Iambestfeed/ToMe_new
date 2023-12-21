@@ -41,7 +41,7 @@ class ToMeBlock(Block):
         if r > 0:
             # Apply ToMe here
             merge, _ = bipartite_soft_matching(
-                x,
+                metric,
                 r,
                 self._tome_info["class_token"],
                 self._tome_info["distill_token"],
