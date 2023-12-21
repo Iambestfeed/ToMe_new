@@ -16,53 +16,62 @@ import torch
 def do_nothing(x, mode=None):
     return x
 
-import torch
-import torch
+from sklearn.cluster import KMeans
+import numpy as np
+def kmeans_soft_matching(metric: torch.Tensor, 
+                          r: int, 
+                          class_token: bool = False, 
+                          distill_token: bool = False,
+                          ) -> Tuple[Callable, Callable]:
+    B, T, C = metric.shape
 
-def custom_merge_tokens_torch_optimized(x: torch.Tensor, r: int, class_token: bool, distill_token: bool) -> Tuple[torch.Tensor, torch.Tensor]:
-    batch_size, num_tokens, hidden_dim = x.shape
-    device = x.device
-    protected_indices = [0] * class_token + [1] * distill_token
-    protected_indices = torch.tensor(protected_indices, device=device, dtype=torch.long)
+    # Xác định chỉ số của các token đặc biệt
+    protected_indices = []
+    if class_token:
+        protected_indices.append(0)
+    if distill_token:
+        protected_indices.append(1 if class_token else 0)
 
-    # Tạo chỉ số cho các token không bảo vệ
-    non_protected_indices = torch.tensor([i for i in range(num_tokens) if i not in protected_indices], device=device)
-    n_clusters = max(num_tokens - len(protected_indices) - 2 * r, 1)
+    # Loại trừ các token đặc biệt khỏi gom nhóm
+    token_indices = [i for i in range(T) if i not in protected_indices]
+    flattened_metric = metric[:, token_indices].reshape(-1, C)
 
-    # Khởi tạo tensor để lưu kết quả
-    merged_tokens = torch.zeros_like(x)
-    token_sizes = torch.ones(batch_size, num_tokens, 1, device=device)
+    # Áp dụng K-means
+    kmeans = KMeans(n_clusters=len(token_indices)-r, random_state=0).fit(flattened_metric.cpu().numpy())
+    labels = kmeans.labels_
 
-    with torch.no_grad():
-        for i in range(batch_size):
-            # Chọn ngẫu nhiên các token cho A và B
-            shuffled_indices = non_protected_indices[torch.randperm(len(non_protected_indices), device=device)]
-            A_indices = torch.cat((shuffled_indices[:n_clusters], protected_indices))
-            B_indices = shuffled_indices[n_clusters:]
+    # Tái tạo tensor labels với các token đặc biệt
+    full_labels = torch.full((B, T), -1, dtype=torch.long, device=metric.device)
+    labels_tensor = torch.tensor(labels, dtype=torch.long, device=metric.device).reshape(B, -1)
+    full_labels[:, token_indices] = labels_tensor
 
-            # Tính khoảng cách và chọn các token từ B để gộp vào A
-            A = x[i, A_indices, :]
-            B = x[i, B_indices, :]
-            distances = torch.cdist(B, A, p=2)
-            closest_A_idx = torch.argmin(distances, dim=1)
+    def merge(x: torch.Tensor, mode: str = "mean") -> torch.Tensor:
+        # mode có thể là 'mean' hoặc 'sum'
+        merged_x = torch.zeros_like(x)
+        for b in range(B):
+            for t in range(T):
+                if full_labels[b, t] != -1:
+                    if mode == "sum":
+                        merged_x[b, full_labels[b, t]] += x[b, t]
+                    elif mode == "mean":
+                        merged_x[b, full_labels[b, t]] += x[b, t] / (full_labels == full_labels[b, t]).sum()
+                else:
+                    merged_x[b, t] = x[b, t]
+        return merged_x
 
-            # Tạo tensor để gộp token
-            scatter_indices = A_indices[closest_A_idx[:r]]
-            scatter_values = x[i, B_indices[:r], :]
+    def unmerge(x: torch.Tensor) -> torch.Tensor:
+        # Phân tách token
+        unmerged_x = torch.zeros_like(x)
+        for b in range(B):
+            for t in range(T):
+                if full_labels[b, t] != -1:
+                    unmerged_x[b, t] = x[b, full_labels[b, t]]
+                else:
+                    unmerged_x[b, t] = x[b, t]
+        return unmerged_x
 
-            # Sử dụng scatter_add_ để gộp token
-            merged_tokens[i].scatter_add_(0, scatter_indices.unsqueeze(1).expand(-1, hidden_dim), scatter_values)
+    return merge, unmerge
 
-            # Cập nhật kích thước của token
-            scatter_size_indices = scatter_indices.unsqueeze(-1).expand(-1, token_sizes.size(2))
-            update_values = torch.ones_like(scatter_size_indices, dtype=token_sizes.dtype)
-            token_sizes[i].scatter_add_(0, scatter_size_indices, update_values)
-
-            # Sao chép các token không thay đổi
-            unchanged_indices = torch.cat((A_indices, B_indices[r:]))
-            merged_tokens[i, unchanged_indices] = x[i, unchanged_indices]
-
-    return merged_tokens, token_sizes
 
 def bipartite_soft_matching(
     metric: torch.Tensor,

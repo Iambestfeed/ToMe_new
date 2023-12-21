@@ -14,8 +14,8 @@ from typing import Tuple
 import torch
 from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
-from new_tome.merge import bipartite_soft_matching, merge_source, merge_wavg
-from new_tome.utils import parse_r
+from tome_x_attn.merge import bipartite_soft_matching, merge_source, merge_wavg
+from tome_x_attn.utils import parse_r
 
 
 class ToMeBlock(Block):
@@ -37,9 +37,6 @@ class ToMeBlock(Block):
         x_attn, metric = self.attn(self.norm1(x), attn_size)
         x = x + self._drop_path1(x_attn)
 
-        
-
-        x = x + self._drop_path2(self.mlp(self.norm2(x)))
         r = self._tome_info["r"].pop(0)
         if r > 0:
             # Apply ToMe here
@@ -54,6 +51,9 @@ class ToMeBlock(Block):
                     merge, x, self._tome_info["source"]
                 )
             x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+
+        x = x + self._drop_path2(self.mlp(self.norm2(x)))
+        
         return x
 
 
