@@ -13,7 +13,7 @@
 import torch
 from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
-from new_tome.utils import parse_r
+from gem_tome.utils import parse_r
 
 from .timm import New_TomeBlock, New_TomeAttention
 
