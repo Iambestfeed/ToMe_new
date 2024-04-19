@@ -14,8 +14,8 @@ from typing import Tuple
 import torch
 from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
-from new_tome.merge import bipartite_soft_matching, merge_source, merge_wavg
-from new_tome.utils import parse_r
+from gem_tome.merge import bipartite_soft_matching, merge_source, merge_wavg
+from gem_tome.utils import parse_r
 
 
 class New_TomeBlock(Block):
