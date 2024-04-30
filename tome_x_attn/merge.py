@@ -10,7 +10,7 @@ from typing import Callable, Tuple
 
 import torch
 
-
+from time import time
 
 
 def do_nothing(x, mode=None):
@@ -18,11 +18,102 @@ def do_nothing(x, mode=None):
 
 from sklearn.cluster import KMeans
 import numpy as np
+
+def nearest_soft_matching(
+    metric: torch.Tensor,
+    r: int,
+    class_token: bool = False,
+    distill_token: bool = False,
+) -> Tuple[Callable, Callable]:
+    """
+    Applies ToMe with a balanced matching set (50%, 50%).
+
+    Input size is [batch, tokens, channels].
+    r indicates the number of tokens to remove (max 50% of tokens).
+
+    Extra args:
+     - class_token: Whether or not there's a class token.
+     - distill_token: Whether or not there's also a distillation token.
+
+    When enabled, the class token and distillation tokens won't get merged.
+    """
+    #st_time = time.time()
+    protected = 0
+    if class_token:
+        protected += 1
+    if distill_token:
+        protected += 1
+
+    # We can only reduce by a maximum of 50% tokens
+    t = metric.shape[1]
+    r = min(r, (t - protected) // 2)
+
+    if r <= 0:
+        return do_nothing, do_nothing
+      
+    #print('Num merging tokens: ', r)
+
+    with torch.no_grad():
+        metric = metric / metric.norm(dim=-1, keepdim=True)
+        even_indices_a = torch.arange(0, 2*r + protected + 1, 2)
+        a = metric[:, even_indices_a, :]
+        mask = torch.ones(metric.shape[1], dtype=bool)
+        mask[even_indices_a] = False
+        b = metric[:, mask, :]
+
+        reshaped_a = a.reshape(a.shape[0] * a.shape[1], a.shape[2])
+        reshaped_b = b.reshape(b.shape[0] * b.shape[1], b.shape[2])
+
+        batch_a = []
+        batch_b = []
+        for i in range(a.shape[0]):
+            batch_a = batch_a + [i] * a.shape[1]
+            batch_b = batch_b + [i] * b.shape[1]
+
+        batch_x = torch.tensor(batch_a).cuda()
+        batch_y = torch.tensor(batch_b).cuda()
+        cluster = nearest(reshaped_a, reshaped_b, batch_x, batch_y)
+        unm_idx = torch.vstack([torch.arange(0, protected) for _ in range(a.shape[0])]).unsqueeze(-1).to(metric.device)
+        src_idx = torch.vstack([torch.arange(protected, a.shape[1]) for _ in range(a.shape[0])]).unsqueeze(-1).to(metric.device)
+        dst_idx = torch.remainder(cluster, b.shape[1]).reshape(b.shape[0], a.shape[1])[:, protected:].unsqueeze(-1).to(metric.device)
+
+        if class_token:
+            # Sort to ensure the class token is at the start
+            unm_idx = unm_idx.sort(dim=1)[0]
+
+    def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
+        src = x[:, even_indices_a, :]
+        dst = x[:, mask, :]
+        n, t1, c = src.shape
+        unm = src.gather(dim=-2, index=unm_idx.expand(n, t1 - r, c))
+        src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
+        dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
+
+        out =  torch.cat([unm, dst], dim=1)
+        return out
+
+    def unmerge(x: torch.Tensor) -> torch.Tensor:
+        unm_len = unm_idx.shape[1]
+        unm, dst = x[..., :unm_len, :], x[..., unm_len:, :]
+        n, _, c = unm.shape
+
+        src = dst.gather(dim=-2, index=dst_idx.expand(n, r, c))
+
+        out = torch.zeros(n, metric.shape[1], c, device=x.device, dtype=x.dtype)
+
+        out[..., 1::2, :] = dst
+        out.scatter_(dim=-2, index=(2 * unm_idx).expand(n, unm_len, c), src=unm)
+        out.scatter_(dim=-2, index=(2 * src_idx).expand(n, r, c), src=src)
+        return out
+
+    return merge, unmerge
+
 def kmeans_soft_matching(metric: torch.Tensor, 
                           r: int, 
                           class_token: bool = False, 
                           distill_token: bool = False,
                           ) -> Tuple[Callable, Callable]:
+    start_log_time = time()
     B, T, C = metric.shape
 
     # Xác định chỉ số của các token đặc biệt
@@ -35,17 +126,22 @@ def kmeans_soft_matching(metric: torch.Tensor,
     # Loại trừ các token đặc biệt khỏi gom nhóm
     token_indices = [i for i in range(T) if i not in protected_indices]
     flattened_metric = metric[:, token_indices].reshape(-1, C)
+    #print("Setup time:", (time() - start_log_time) * 1000, 'ms')
 
+    start_log_time = time()
     # Áp dụng K-means
     kmeans = KMeans(n_clusters=len(token_indices)-r, random_state=0).fit(flattened_metric.cpu().numpy())
     labels = kmeans.labels_
 
+    start_log_time = time()
     # Tái tạo tensor labels với các token đặc biệt
     full_labels = torch.full((B, T), -1, dtype=torch.long, device=metric.device)
     labels_tensor = torch.tensor(labels, dtype=torch.long, device=metric.device).reshape(B, -1)
     full_labels[:, token_indices] = labels_tensor
+    #print("Build graph to merge time:", (time() - start_log_time) * 1000, 'ms')
 
     def merge(x: torch.Tensor, mode: str = "mean") -> torch.Tensor:
+        start_log_time = time()
         # mode có thể là 'mean' hoặc 'sum'
         merged_x = torch.zeros_like(x)
         for b in range(B):
@@ -57,6 +153,7 @@ def kmeans_soft_matching(metric: torch.Tensor,
                         merged_x[b, full_labels[b, t]] += x[b, t] / (full_labels == full_labels[b, t]).sum()
                 else:
                     merged_x[b, t] = x[b, t]
+        print("Merge time:", (time() - start_log_time) * 1000, 'ms')
         return merged_x
 
     def unmerge(x: torch.Tensor) -> torch.Tensor:
@@ -91,6 +188,7 @@ def bipartite_soft_matching(
 
     When enabled, the class token and distillation tokens won't get merged.
     """
+    start_log_time = time()
     protected = 0
     if class_token:
         protected += 1
@@ -103,8 +201,10 @@ def bipartite_soft_matching(
 
     if r <= 0:
         return do_nothing, do_nothing
+    #print("Setup time:", (time() - start_log_time) * 1000, 'ms')
 
     with torch.no_grad():
+        start_log_time = time()
         metric = metric / metric.norm(dim=-1, keepdim=True)
         a, b = metric[..., ::2, :], metric[..., 1::2, :]
         scores = a @ b.transpose(-1, -2)
@@ -113,7 +213,10 @@ def bipartite_soft_matching(
             scores[..., 0, :] = -math.inf
         if distill_token:
             scores[..., :, 0] = -math.inf
+        
+        #print("Score calculation time:", (time() - start_log_time) * 1000, 'ms')
 
+        start_log_time = time()
         node_max, node_idx = scores.max(dim=-1)
         edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
 
@@ -124,8 +227,10 @@ def bipartite_soft_matching(
         if class_token:
             # Sort to ensure the class token is at the start
             unm_idx = unm_idx.sort(dim=1)[0]
+        #print("Build graph to merge time:", (time() - start_log_time) * 1000, 'ms')
 
     def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
+        start_log_time = time()
         src, dst = x[..., ::2, :], x[..., 1::2, :]
         n, t1, c = src.shape
         unm = src.gather(dim=-2, index=unm_idx.expand(n, t1 - r, c))
@@ -136,6 +241,7 @@ def bipartite_soft_matching(
             out = torch.cat([unm[:, :1], dst[:, :1], unm[:, 1:], dst[:, 1:]], dim=1)
         else:
             out =  torch.cat([unm, dst], dim=1)
+        #print("Merge time:", (time() - start_log_time) * 1000, 'ms')
         return out
 
     def unmerge(x: torch.Tensor) -> torch.Tensor:
@@ -279,6 +385,7 @@ def merge_wavg(
     size = merge(size, mode="sum")
 
     x = x / size
+
     return x, size
 
 
@@ -289,6 +396,7 @@ def merge_source(
     For source tracking. Source is an adjacency matrix between the initial tokens and final merged groups.
     x is used to find out how many tokens there are in case the source is None.
     """
+    
     if source is None:
         n, t, _ = x.shape
         source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)

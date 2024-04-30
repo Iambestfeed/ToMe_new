@@ -76,6 +76,7 @@ def kmeans_soft_matching(metric: torch.Tensor,
 def bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
+    method: str,
     class_token: bool = False,
     distill_token: bool = False,
 ) -> Tuple[Callable, Callable]:
@@ -129,8 +130,19 @@ def bipartite_soft_matching(
         src, dst = x[..., ::2, :], x[..., 1::2, :]
         n, t1, c = src.shape
         unm = src.gather(dim=-2, index=unm_idx.expand(n, t1 - r, c))
-        src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
-        dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
+        '''src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
+        dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)'''
+        if method == "pruned":
+            dst = dst
+        elif method == "average":
+            src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
+            dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
+        else:
+            src_tokens = src.gather(dim=-2, index=src_idx.expand(n, r, c))
+            dst_tokens = dst.scatter_reduce(-2, dst_idx, src, mode)
+            dst_norm = dst_tokens.norm(dim=-1, keepdim=True)
+            n = dst_norm.scatter_reduce(-2, dst_idx, src_tokens.norm(dim=-1, keepdim=True), 'max')
+            dst = dst_tokens / (dst_norm + 1e-9) * n
 
         if distill_token:
             out = torch.cat([unm[:, :1], dst[:, :1], unm[:, 1:], dst[:, 1:]], dim=1)
