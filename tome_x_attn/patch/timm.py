@@ -14,7 +14,7 @@ from typing import Tuple
 import torch
 from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
-from tome_x_attn.merge import bipartite_soft_matching, merge_source, merge_wavg
+from tome_x_attn.merge import kmeans_soft_matching, bipartite_soft_matching, merge_source, merge_wavg
 from tome_x_attn.utils import parse_r
 
 
@@ -36,22 +36,33 @@ class ToMeBlock(Block):
         attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
         x_attn, metric = self.attn(self.norm1(x), attn_size)
         x = x + self._drop_path1(x_attn)
+        '''if (len(self._tome_info['coordinates']) != len(x)):
+            self._tome_info['coordinates'] = self._tome_info['coordinates'].unsqueeze(0).expand(x.shape[0], -1, -1).to(x.device)
+
+        if x.shape[1] != self._tome_info['coordinates'].shape[1]:
+            self._tome_info['coordinates'] = self.coordinates_default.unsqueeze(0).expand(x.shape[0], -1, -1).to(x.device)'''
+
+        #add coordinates
+        #print('Coor:', self._tome_info['coordinates'].shape)
+        #x = torch.cat([x, self._tome_info['coordinates']], dim=2)
 
         r = self._tome_info["r"].pop(0)
         if r > 0:
             # Apply ToMe here
             merge, _ = bipartite_soft_matching(
-                x,
+                x_attn,
                 r,
                 self._tome_info["class_token"],
                 self._tome_info["distill_token"],
             )
             if self._tome_info["trace_source"]:
+                #print("Merge Cluster:")
                 self._tome_info["source"] = merge_source(
                     merge, x, self._tome_info["source"]
                 )
+            #print("Merge Tokens:")
             x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
-
+        '''x, self._tome_info['coordinates'] = torch.split(x, [768, 2], dim=2)'''
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         
         return x
@@ -115,7 +126,7 @@ def make_tome_class(transformer_class):
 
 
 def apply_patch(
-    model: VisionTransformer, trace_source: bool = False, prop_attn: bool = True
+    model: VisionTransformer, trace_source: bool = False, prop_attn: bool = True, local_ratio: int = 1,
 ):
     """
     Applies ToMe to this transformer. Afterward, set r using model.r.
@@ -143,9 +154,25 @@ def apply_patch(
     if hasattr(model, "dist_token") and model.dist_token is not None:
         model._tome_info["distill_token"] = True
 
+    special_token = int((model._tome_info["distill_token"] == True)) + int((model._tome_info["class_token"] == True))
+    num_token = special_token + model.patch_embed.num_patches
+
+    k = model.patch_embed.num_patches ** 0.5 + 1
+    X, Y = torch.meshgrid(torch.arange(1, k), torch.arange(1, k))
+    coordinates = torch.stack([X.reshape(-1), Y.reshape(-1)], dim=1)
+    origin_coordinate = torch.tensor([[0, 0]])
+    for i in range(special_token):
+        coordinates = torch.cat([origin_coordinate, coordinates], dim=0)
+    model._tome_info['coordinates'] = coordinates * local_ratio
+
     for module in model.modules():
         if isinstance(module, Block):
             module.__class__ = ToMeBlock
             module._tome_info = model._tome_info
+            module.coordinates_default = coordinates * local_ratio
         elif isinstance(module, Attention):
             module.__class__ = ToMeAttention
+
+    
+
+    

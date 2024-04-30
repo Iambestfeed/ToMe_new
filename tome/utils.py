@@ -103,3 +103,16 @@ def parse_r(num_layers: int, r: Union[List[int], Tuple[int, float], int]) -> Lis
     step = (max_val - min_val) / (num_layers - 1)
 
     return [int(min_val + step * i) for i in range(num_layers)]
+
+def parser_fusion_method(num_layers: int, method: Union[List[str], str]) -> List[str]:
+    """
+    Maybe fill soon
+    """
+    if isinstance(method, list):
+        if len(method) < num_layers:
+            method = method + ['average'] * (num_layers - len(method))
+        return method
+    elif isinstance(method, str):
+        method = [method] * num_layers
+
+    return method

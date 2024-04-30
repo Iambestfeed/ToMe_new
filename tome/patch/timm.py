@@ -15,7 +15,7 @@ import torch
 from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
 from tome.merge import bipartite_soft_matching, merge_source, merge_wavg
-from tome.utils import parse_r
+from tome.utils import parse_r, parser_fusion_method
 
 
 class ToMeBlock(Block):
@@ -38,11 +38,13 @@ class ToMeBlock(Block):
         x = x + self._drop_path1(x_attn)
 
         r = self._tome_info["r"].pop(0)
+        method = self._tome_info["method"].pop(0)
         if r > 0:
             # Apply ToMe here
             merge, _ = bipartite_soft_matching(
-                metric,
+                x_attn,
                 r,
+                method,
                 self._tome_info["class_token"],
                 self._tome_info["distill_token"],
             )
@@ -106,6 +108,7 @@ def make_tome_class(transformer_class):
 
         def forward(self, *args, **kwdargs) -> torch.Tensor:
             self._tome_info["r"] = parse_r(len(self.blocks), self.r)
+            self._tome_info["method"] = parser_fusion_method(len(self.blocks), self.method)
             self._tome_info["size"] = None
             self._tome_info["source"] = None
 
@@ -130,8 +133,10 @@ def apply_patch(
 
     model.__class__ = ToMeVisionTransformer
     model.r = 0
+    model.method = 'average'
     model._tome_info = {
         "r": model.r,
+        'method': model.method,
         "size": None,
         "source": None,
         "trace_source": trace_source,
