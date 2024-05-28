@@ -138,11 +138,12 @@ def bipartite_soft_matching(
             src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
             dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
         else:
-            src_tokens = src.gather(dim=-2, index=src_idx.expand(n, r, c))
-            dst_tokens = dst.scatter_reduce(-2, dst_idx, src, mode)
-            dst_norm = dst_tokens.norm(dim=-1, keepdim=True)
-            n = dst_norm.scatter_reduce(-2, dst_idx, src_tokens.norm(dim=-1, keepdim=True), 'max')
-            dst = dst_tokens / (dst_norm + 1e-9) * n
+            dst_norm = torch.norm(dst, dim = -1)
+            src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
+            src_norm = torch.norm(src, dim = -1)
+            dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
+            n = dst_norm.scatter_reduce(-1, dst_idx.squeeze(-1), src_norm, reduce='amax')
+            dst = dst/dst_norm[..., None] * n[..., None]
 
         if distill_token:
             out = torch.cat([unm[:, :1], dst[:, :1], unm[:, 1:], dst[:, 1:]], dim=1)
