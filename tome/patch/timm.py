@@ -15,7 +15,7 @@ import torch
 from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
 from tome.merge import bipartite_soft_matching, merge_source, merge_wavg
-from tome.utils import parse_r, parser_fusion_method
+from tome.utils import parse_r, parser_fusion_method, parser_source
 
 
 class ToMeBlock(Block):
@@ -33,29 +33,75 @@ class ToMeBlock(Block):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Note: this is copied from timm.models.vision_transformer.Block with modifications.
+        source = self._tome_info["input_source"].pop(0)
+        r = self._tome_info["r"].pop(0)
+        method = self._tome_info["method"].pop(0)
         attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
         x_attn, metric = self.attn(self.norm1(x), attn_size)
         x = x + self._drop_path1(x_attn)
-
-        r = self._tome_info["r"].pop(0)
-        method = self._tome_info["method"].pop(0)
-        if r > 0:
-            # Apply ToMe here
-            merge, _ = bipartite_soft_matching(
-                x_attn,
-                r,
-                method,
-                self._tome_info["class_token"],
-                self._tome_info["distill_token"],
-            )
-            if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(
-                    merge, x, self._tome_info["source"]
+        
+        if source == 'x_attn':
+            if r > 0:
+                # Apply ToMe here
+                merge, _ = bipartite_soft_matching(
+                    x_attn,
+                    r,
+                    method,
+                    self._tome_info["class_token"],
+                    self._tome_info["distill_token"],
                 )
-            x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+                if self._tome_info["trace_source"]:
+                    self._tome_info["source"] = merge_source(
+                        merge, x, self._tome_info["source"]
+                    )
+                x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+        elif source == 'metric':
+            if r > 0:
+                # Apply ToMe here
+                merge, _ = bipartite_soft_matching(
+                    metric,
+                    r,
+                    method,
+                    self._tome_info["class_token"],
+                    self._tome_info["distill_token"],
+                )
+                if self._tome_info["trace_source"]:
+                    self._tome_info["source"] = merge_source(
+                        merge, x, self._tome_info["source"]
+                    )
+                x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+        elif source == 'x+x_attn':
+            if r > 0:
+                # Apply ToMe here
+                merge, _ = bipartite_soft_matching(
+                    x + x_attn,
+                    r,
+                    method,
+                    self._tome_info["class_token"],
+                    self._tome_info["distill_token"],
+                )
+                if self._tome_info["trace_source"]:
+                    self._tome_info["source"] = merge_source(
+                        merge, x, self._tome_info["source"]
+                    )
+                x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
 
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
-        
+        if source == 'x_output':
+            if r > 0:
+                # Apply ToMe here
+                merge, _ = bipartite_soft_matching(
+                    x + x_attn,
+                    r,
+                    method,
+                    self._tome_info["class_token"],
+                    self._tome_info["distill_token"],
+                )
+                if self._tome_info["trace_source"]:
+                    self._tome_info["source"] = merge_source(
+                        merge, x, self._tome_info["source"]
+                    )
+                x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
         return x
 
 
@@ -109,6 +155,7 @@ def make_tome_class(transformer_class):
         def forward(self, *args, **kwdargs) -> torch.Tensor:
             self._tome_info["r"] = parse_r(len(self.blocks), self.r)
             self._tome_info["method"] = parser_fusion_method(len(self.blocks), self.method)
+            self._tome_info["input_source"] = parser_source(len(self.blocks), self.source_type)
             self._tome_info["size"] = None
             self._tome_info["source"] = None
 
@@ -134,9 +181,11 @@ def apply_patch(
     model.__class__ = ToMeVisionTransformer
     model.r = 0
     model.method = 'average'
+    model.source_type = 'metric'
     model._tome_info = {
         "r": model.r,
         'method': model.method,
+        "input_source" : model.source_type,
         "size": None,
         "source": None,
         "trace_source": trace_source,

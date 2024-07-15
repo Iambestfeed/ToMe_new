@@ -116,3 +116,16 @@ def parser_fusion_method(num_layers: int, method: Union[List[str], str]) -> List
         method = [method] * num_layers
 
     return method
+
+def parser_source(num_layers: int, source: Union[List[str], str]) -> List[str]:
+    """
+    Maybe fill soon
+    """
+    if isinstance(source, list):
+        if len(source) < num_layers:
+            source = source + ['x_attn'] * (num_layers - len(source))
+        return source
+    elif isinstance(source, str):
+        source = [source] * num_layers
+
+    return source
