@@ -17,6 +17,7 @@ from timm.data.constants import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from timm.data import create_transform
 
 from cjm_pytorch_utils.core import set_seed
+
 import copy
 
 import argparse
@@ -45,6 +46,7 @@ parser.add_argument('--image_size', type=int, default=224, required=True,
 args = parser.parse_args()
 
 size = args.image_size
+
 t = []
 t.append(transforms.Resize(size, interpolation=3), )
 t.append(transforms.CenterCrop(224))
@@ -194,8 +196,7 @@ plt.ylabel('Accuracy')
 plt.legend()
 
 new_chart_path = args.model_name + '_' + args.dataset_name + '.png'
+new_chart_path = '/kaggle/working/' + args.model_name + '_' + args.dataset_name + '.png'
 plt.savefig(new_chart_path)
 
 plt.show()
-
-new_chart_path
